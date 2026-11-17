@@ -43,6 +43,7 @@ type SchemaRunner interface {
 // RealSchemaRunner implements the SchemaRunner interface.
 type RealSchemaRunner struct {
 	configStore xpkg.ConfigStore
+	envPrefixes []string
 }
 
 // NewRealSchemaRunner creates a new RealSchemaRunner.
@@ -56,6 +57,16 @@ func NewRealSchemaRunner(opts ...ROption) *RealSchemaRunner {
 
 // ROption configures the SchemaRunner.
 type ROption func(*RealSchemaRunner)
+
+// WithEnvPrefixes forwards environment variables with the given prefixes into
+// the tooling container, in addition to the default CROSSPLANE_ prefix. Host
+// CLIs use this to make their own variables visible to language tooling
+// (e.g. tests reading credentials from the environment).
+func WithEnvPrefixes(prefixes ...string) ROption {
+	return func(r *RealSchemaRunner) {
+		r.envPrefixes = append(r.envPrefixes, prefixes...)
+	}
+}
 
 // WithImageConfig adds image rewriting rules to the SchemaRunner.
 func WithImageConfig(cfgs []pkgv1beta1.ImageConfig) ROption {
@@ -146,10 +157,14 @@ func (r RealSchemaRunner) Generate(ctx context.Context, fromFS afero.Fs, baseFol
 		return errors.Wrapf(err, "failed to create tar from fs")
 	}
 
+	prefixes := append([]string{"CROSSPLANE_"}, r.envPrefixes...)
 	var envVars []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "CROSSPLANE_") {
-			envVars = append(envVars, e)
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(e, prefix) {
+				envVars = append(envVars, e)
+				break
+			}
 		}
 	}
 
