@@ -14,7 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+// Package project exposes the crossplane CLI's project machinery to host
+// CLIs: parsing project files, building projects into package images, and
+// generating language schemas. Terminal, configuration, and Kong binding
+// helpers live in pkg/cli.
+package project
 
 import (
 	"cmp"
@@ -29,10 +33,14 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 
+	pkgv1beta1 "github.com/crossplane/crossplane/apis/v2/pkg/v1beta1"
+
 	devv1alpha1 "github.com/crossplane/cli/v2/apis/dev/v1alpha1"
 	"github.com/crossplane/cli/v2/internal/dependency"
 	"github.com/crossplane/cli/v2/internal/git"
-	"github.com/crossplane/cli/v2/internal/project"
+	"github.com/crossplane/cli/v2/internal/async"
+	"github.com/crossplane/cli/v2/internal/config"
+	internalproject "github.com/crossplane/cli/v2/internal/project"
 	"github.com/crossplane/cli/v2/internal/project/functions"
 	"github.com/crossplane/cli/v2/internal/project/projectfile"
 	"github.com/crossplane/cli/v2/internal/schemas/generator"
@@ -41,9 +49,25 @@ import (
 	clixpkg "github.com/crossplane/cli/v2/internal/xpkg"
 )
 
+// Config is the crossplane CLI configuration; see pkg/cli for loading it.
+type Config = config.Config
+
+// EventChannel carries asynchronous progress events during long-running
+// operations such as builds.
+type EventChannel = async.EventChannel
+
+// FileName is the default name of a project's definition file.
+const FileName = clixpkg.ProjectFile
+
+// APIVersion and Kind identify the project file's type.
+const (
+	APIVersion = projectfile.APIVersion
+	Kind       = projectfile.Kind
+)
+
 // ImageTagMap maps image tags to the images that should be pushed to them,
 // as produced by a project build.
-type ImageTagMap = project.ImageTagMap
+type ImageTagMap = internalproject.ImageTagMap
 
 // ParseProject reads, validates, and defaults the project file at
 // projFilePath within projFS.
@@ -55,7 +79,7 @@ func ParseProject(projFS afero.Fs, projFilePath string) (*devv1alpha1.Project, e
 // the configuration image and the embedded function images, grouped by the
 // repository they belong to.
 func SortImages(imgMap ImageTagMap, repo string) (v1.Image, map[name.Repository][]v1.Image, error) {
-	return project.SortImages(imgMap, repo)
+	return internalproject.SortImages(imgMap, repo)
 }
 
 // BuildOptions configures a project build.
@@ -77,7 +101,7 @@ type BuildOptions struct {
 	GitUsername string
 	GitToken    string
 	// EventChannel receives progress events during the build, if set.
-	EventChannel EventChannel
+	EventChannel async.EventChannel
 	// Logger receives debug output during the build, if set.
 	Logger logging.Logger
 	// BasePath is the real on-disk base path of projFS, needed to build
@@ -89,7 +113,7 @@ type BuildOptions struct {
 // resolving dependencies the same way `crossplane project build` does. It
 // returns the built images by tag along with the digests of any dependencies
 // that were resolved during the build.
-func Build(ctx context.Context, cfg *Config, proj *devv1alpha1.Project, projFS afero.Fs, o BuildOptions) (ImageTagMap, map[string]name.Digest, error) {
+func Build(ctx context.Context, cfg *config.Config, proj *devv1alpha1.Project, projFS afero.Fs, o BuildOptions) (ImageTagMap, map[string]name.Digest, error) {
 	logger := o.Logger
 	if logger == nil {
 		logger = logging.NewNopLogger()
@@ -119,7 +143,7 @@ func Build(ctx context.Context, cfg *Config, proj *devv1alpha1.Project, projFS a
 	}
 
 	depOpts := []dependency.ManagerOption{
-		dependency.WithProjectFile(cmp.Or(o.ProjectFile, ProjectFile)),
+		dependency.WithProjectFile(cmp.Or(o.ProjectFile, FileName)),
 		dependency.WithSchemaFS(schemasFS),
 		dependency.WithSchemaGenerators(generators),
 		dependency.WithSchemaRunner(schemaRunner),
@@ -142,23 +166,23 @@ func Build(ctx context.Context, cfg *Config, proj *devv1alpha1.Project, projFS a
 		return nil, nil, errors.Wrap(err, "failed to create temporary build directory")
 	}
 
-	b := project.NewBuilder(
-		project.BuildWithMaxConcurrency(cmp.Or(o.MaxConcurrency, 8)),
-		project.BuildWithFunctionIdentifier(functions.DefaultIdentifier),
-		project.BuildWithSchemaManager(schemaMgr),
-		project.BuildWithDependencyManager(depMgr),
-		project.BuildWithTempDir(tempDir),
-		project.BuildWithBaseImageCacheDir(functions.DefaultBaseImageCacheDir()),
+	b := internalproject.NewBuilder(
+		internalproject.BuildWithMaxConcurrency(cmp.Or(o.MaxConcurrency, 8)),
+		internalproject.BuildWithFunctionIdentifier(functions.DefaultIdentifier),
+		internalproject.BuildWithSchemaManager(schemaMgr),
+		internalproject.BuildWithDependencyManager(depMgr),
+		internalproject.BuildWithTempDir(tempDir),
+		internalproject.BuildWithBaseImageCacheDir(functions.DefaultBaseImageCacheDir()),
 	)
 
-	buildOpts := []project.BuildOption{
-		project.BuildWithLogger(logger),
+	buildOpts := []internalproject.BuildOption{
+		internalproject.BuildWithLogger(logger),
 	}
 	if o.EventChannel != nil {
-		buildOpts = append(buildOpts, project.BuildWithEventChannel(o.EventChannel))
+		buildOpts = append(buildOpts, internalproject.BuildWithEventChannel(o.EventChannel))
 	}
 	if o.BasePath != "" {
-		buildOpts = append(buildOpts, project.BuildWithProjectBasePath(o.BasePath))
+		buildOpts = append(buildOpts, internalproject.BuildWithProjectBasePath(o.BasePath))
 	}
 
 	imgMap, deps, err := b.Build(ctx, proj, projFS, buildOpts...)
@@ -185,7 +209,7 @@ const SchemaSourceTypeCRD = manager.SourceTypeCRD
 // as schema generation for the project's dependencies and APIs. Host CLIs
 // use this to merge schemas for their own meta APIs into the project's
 // models.
-func AddSchemas(ctx context.Context, cfg *Config, proj *devv1alpha1.Project, projFS afero.Fs, src SchemaSource) error {
+func AddSchemas(ctx context.Context, cfg *config.Config, proj *devv1alpha1.Project, projFS afero.Fs, src SchemaSource) error {
 	schemasFS := afero.NewBasePathFs(projFS, proj.Spec.Paths.Schemas)
 	generators := generator.Filter(
 		generator.AllLanguages(
@@ -197,4 +221,39 @@ func AddSchemas(ctx context.Context, cfg *Config, proj *devv1alpha1.Project, pro
 	schemaRunner := runner.NewRealSchemaRunner(runner.WithImageConfig(proj.Spec.ImageConfigs))
 
 	return manager.New(schemasFS, generators, schemaRunner).Add(ctx, src)
+}
+
+// SchemaRunner runs language tooling in containers over a filesystem. It is
+// used for schema generation and by host CLIs to execute language-based
+// tests.
+type SchemaRunner = runner.SchemaRunner
+
+// SchemaRunnerOption configures a single SchemaRunner.Generate invocation.
+type SchemaRunnerOption = runner.Option
+
+// NewSchemaRunner returns a SchemaRunner that rewrites tooling images
+// according to the given image configs.
+func NewSchemaRunner(cfgs []pkgv1beta1.ImageConfig) SchemaRunner {
+	return runner.NewRealSchemaRunner(runner.WithImageConfig(cfgs))
+}
+
+// WithWorkDirectory sets the working directory for a Generate invocation.
+func WithWorkDirectory(dir string) SchemaRunnerOption {
+	return runner.WithWorkDirectory(dir)
+}
+
+// WithCopyToPath sets the container path the input filesystem is copied to.
+func WithCopyToPath(path string) SchemaRunnerOption {
+	return runner.WithCopyToPath(path)
+}
+
+// WithCopyFromPath sets the container path results are copied back from.
+func WithCopyFromPath(path string) SchemaRunnerOption {
+	return runner.WithCopyFromPath(path)
+}
+
+// WithVolumeMount mounts a named Docker volume at the given container path,
+// e.g. to give the container a cache that outlives it.
+func WithVolumeMount(name, containerPath string) SchemaRunnerOption {
+	return runner.WithVolumeMount(name, containerPath)
 }
