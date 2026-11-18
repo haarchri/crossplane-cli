@@ -527,6 +527,7 @@ func (p *DefaultCompDiffProcessor) processSingleComposition(ctx context.Context,
 	// list them or only count them is the renderer's decision (see CompositionDiff.Scoped).
 	for _, d := range droppedXRs {
 		result.ImpactAnalysis = append(result.ImpactAnalysis, dt.XRImpact{
+			ComposedBy: parentCompositeRef(d.xr),
 			ObjectReference: corev1.ObjectReference{
 				APIVersion: d.xr.GetAPIVersion(),
 				Kind:       d.xr.GetKind(),
@@ -1467,7 +1468,7 @@ func (p *DefaultCompDiffProcessor) buildImpactAnalysis(xrs []*un.Unstructured, r
 		resourceID := dt.MakeDiffKeyFromResource(xr)
 		result := results[resourceID]
 
-		impact := dt.XRImpact{ObjectReference: objectRef(xr)}
+		impact := dt.XRImpact{ObjectReference: objectRef(xr), ComposedBy: parentCompositeRef(xr)}
 
 		switch {
 		case result != nil && result.HasError():
@@ -1494,4 +1495,24 @@ func (p *DefaultCompDiffProcessor) buildImpactAnalysis(xrs []*un.Unstructured, r
 	}
 
 	return impacts, summary
+}
+
+// parentCompositeRef returns a reference to the parent composite of a nested XR,
+// derived from its controller owner reference; nil for a top-level XR. Only
+// an XR that carries the composite label is considered nested.
+func parentCompositeRef(xr *un.Unstructured) *corev1.ObjectReference {
+	if _, ok := xr.GetLabels()[LabelComposite]; !ok {
+		return nil
+	}
+	for _, ref := range xr.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller {
+			return &corev1.ObjectReference{
+				APIVersion: ref.APIVersion,
+				Kind:       ref.Kind,
+				Name:       ref.Name,
+				Namespace:  xr.GetNamespace(),
+			}
+		}
+	}
+	return nil
 }

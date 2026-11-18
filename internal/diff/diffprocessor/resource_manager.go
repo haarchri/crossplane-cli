@@ -173,6 +173,14 @@ func (m *DefaultResourceManager) checkCompositeOwnership(ctx context.Context, cu
 		return
 	}
 
+	// A new owner that is itself composed by the resource's current owner is
+	// not taking ownership away from it: the resource is moving within one
+	// composition tree, from a parent XR to a nested XR it composes. That is
+	// the normal shape of a nested composition, not something to warn about.
+	if composite.GetLabels()[LabelComposite] == owner {
+		return
+	}
+
 	m.advisories.Raise(dt.OutputWarning{
 		// TODO:  should we fail by default here?  maybe require a --force flag to proceed?
 		Message: "Resource already belongs to another composite.  Applying this diff will assume ownership!",
@@ -182,6 +190,8 @@ func (m *DefaultResourceManager) checkCompositeOwnership(ctx context.Context, cu
 			"currentOwner": owner,
 			"newOwner":     newOwner,
 		},
+		// One line per owner pair is enough for a human; structured output keeps every resource.
+		GroupBy: []string{"currentOwner", "newOwner"},
 	})
 }
 
