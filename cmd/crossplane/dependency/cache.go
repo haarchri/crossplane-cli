@@ -50,6 +50,8 @@ type updateCacheCmd struct {
 	ProjectFile string `default:"${project_file}"   help:"Path to project definition file."            short:"f"`
 	CacheDir    string `env:"CROSSPLANE_XPKG_CACHE" help:"Directory for cached xpkg package contents." name:"cache-dir"`
 	GitToken    string `env:"CROSSPLANE_GIT_TOKEN"  help:"Token for git HTTPS authentication."`
+	GitProxy           string `env:"CROSSPLANE_GIT_PROXY"             help:"Proxy URL to tunnel git operations through, for example http://proxy:8080. Supports HTTP CONNECT for SSH tunneling."`
+	GitInsecureHostKey bool   `env:"CROSSPLANE_GIT_INSECURE_HOST_KEY" help:"Skip SSH host key verification for git operations. Only use if you understand the MITM risks."`
 	GitUsername string `default:"x-access-token"    env:"CROSSPLANE_GIT_USERNAME"                      help:"Username for git HTTPS authentication."`
 }
 
@@ -97,6 +99,12 @@ func (c *updateCacheCmd) Run(logger logging.Logger, sp terminal.SpinnerPrinter, 
 			Username: c.GitUsername,
 			Password: c.GitToken,
 		}))
+	}
+	if c.GitProxy != "" {
+		opts = append(opts, dependency.WithGitProxyURL(c.GitProxy))
+	}
+	if c.GitInsecureHostKey {
+		opts = append(opts, dependency.WithGitInsecureHostKey(true))
 	}
 
 	m := dependency.NewManager(proj, projFS, opts...)

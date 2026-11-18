@@ -58,6 +58,8 @@ type BuildCmd struct {
 	MaxConcurrency uint   `default:"8"                                         help:"Max concurrent function builds."`
 	CacheDir       string `env:"CROSSPLANE_XPKG_CACHE"                         help:"Directory for cached xpkg package contents." name:"cache-dir"`
 	GitToken       string `env:"CROSSPLANE_GIT_TOKEN"                          help:"Token for git HTTPS authentication."`
+	GitProxy           string `env:"CROSSPLANE_GIT_PROXY"             help:"Proxy URL to tunnel git operations through, for example http://proxy:8080. Supports HTTP CONNECT for SSH tunneling."`
+	GitInsecureHostKey bool   `env:"CROSSPLANE_GIT_INSECURE_HOST_KEY" help:"Skip SSH host key verification for git operations. Only use if you understand the MITM risks."`
 	GitUsername    string `default:"x-access-token"                            env:"CROSSPLANE_GIT_USERNAME"                      help:"Username for git HTTPS authentication."`
 
 	proj   *devv1alpha1.Project
@@ -127,6 +129,12 @@ func (c *BuildCmd) Run(logger logging.Logger, sp terminal.SpinnerPrinter, cfg *c
 			Username: c.GitUsername,
 			Password: c.GitToken,
 		}))
+	}
+	if c.GitProxy != "" {
+		opts = append(opts, dependency.WithGitProxyURL(c.GitProxy))
+	}
+	if c.GitInsecureHostKey {
+		opts = append(opts, dependency.WithGitInsecureHostKey(true))
 	}
 
 	depMgr := dependency.NewManager(c.proj, c.projFS, opts...)

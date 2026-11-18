@@ -100,6 +100,11 @@ type BuildOptions struct {
 	// HTTPS.
 	GitUsername string
 	GitToken    string
+	// GitProxy tunnels git operations via an HTTP CONNECT proxy.
+	GitProxy string
+	// GitInsecureHostKey disables SSH host key verification for git-based
+	// dependencies over SSH.
+	GitInsecureHostKey bool
 	// EventChannel receives progress events during the build, if set.
 	EventChannel async.EventChannel
 	// Logger receives debug output during the build, if set.
@@ -160,6 +165,12 @@ func Build(ctx context.Context, cfg *config.Config, proj *devv1alpha1.Project, p
 			Username: o.GitUsername,
 			Password: o.GitToken,
 		}))
+	}
+	if o.GitProxy != "" {
+		depOpts = append(depOpts, dependency.WithGitProxyURL(o.GitProxy))
+	}
+	if o.GitInsecureHostKey {
+		depOpts = append(depOpts, dependency.WithGitInsecureHostKey(true))
 	}
 	depMgr := dependency.NewManager(proj, projFS, depOpts...)
 
@@ -281,6 +292,11 @@ type DependencySchemasOptions struct {
 	// HTTPS.
 	GitUsername string
 	GitToken    string
+	// GitProxy tunnels git operations via an HTTP CONNECT proxy.
+	GitProxy string
+	// GitInsecureHostKey disables SSH host key verification for git-based
+	// dependencies over SSH.
+	GitInsecureHostKey bool
 }
 
 // DependencySchemaSet holds the schema inputs provided by a project's crd
@@ -298,17 +314,27 @@ type DependencySchemaSet struct {
 // and k8s dependencies - the same sources the dependency manager generates
 // language schemas from. Hosts use them e.g. to validate rendered resources.
 func DependencySchemas(ctx context.Context, proj *devv1alpha1.Project, o DependencySchemasOptions) (*DependencySchemaSet, error) {
-	authProvider := &git.HTTPSAuthProvider{
-		Username: o.GitUsername,
-		Password: o.GitToken,
-	}
-
 	set := &DependencySchemaSet{}
 	for _, dep := range proj.Spec.Dependencies {
 		var src manager.Source
 		switch {
 		case dep.Git != nil:
-			src = manager.NewGitSource(dep, &git.DefaultCloner{}, authProvider)
+			var authProvider git.AuthProvider
+			switch {
+			case o.GitToken != "":
+				authProvider = &git.HTTPSAuthProvider{
+					Username: o.GitUsername,
+					Password: o.GitToken,
+				}
+			case git.IsSSHURL(dep.Git.Repository):
+				authProvider = &git.SSHAgentAuthProvider{
+					Username:              git.ExtractSSHUsername(dep.Git.Repository),
+					InsecureIgnoreHostKey: o.GitInsecureHostKey,
+				}
+			default:
+				authProvider = &git.HTTPSAuthProvider{}
+			}
+			src = manager.NewGitSource(dep, &git.DefaultCloner{ProxyURL: o.GitProxy}, authProvider)
 		case dep.HTTP != nil:
 			src = manager.NewHTTPSource(dep)
 		case dep.K8s != nil:
